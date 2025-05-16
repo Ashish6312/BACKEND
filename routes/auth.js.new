@@ -1,0 +1,119 @@
+const express = require('express');
+const router = express.Router();
+const User = require('../models/User');
+const bcrypt = require('bcryptjs');
+const Transaction = require('../models/Transaction');
+const jwt = require('jsonwebtoken');
+const dotenv = require('dotenv');
+const Purchase = require('../models/Purchase');
+dotenv.config();
+const razorpay = require('../razorpay');
+const crypto = require('crypto');
+const { sendOTP, generateOTP } = require('../services/smsService');
+const moment = require('moment');
+const rateLimit = require('express-rate-limit');
+
+// Rate limiting for OTP requests - 3 attempts per 15 minutes
+const otpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 3,
+  message: { msg: 'Too many OTP requests. Please try again later.' }
+});
+
+// ... Registration and login routes remain unchanged ...
+
+// POST /api/auth/create-order
+router.post('/create-order', async (req, res) => {
+  try {
+    const { amount } = req.body;
+
+    // Validate amount
+    if (!amount || isNaN(amount) || amount < 100) {
+      return res.status(400).json({ 
+        success: false,
+        msg: "Invalid amount. Minimum amount is ₹100" 
+      });
+    }
+
+    // Create order object
+    const options = {
+      amount: Math.round(parseFloat(amount) * 100), // amount in paise
+      currency: "INR",
+      receipt: `receipt_${Date.now()}`,
+      payment_capture: 1 // Auto capture payment
+    };
+    
+    // Create order using razorpayInstance
+    try {
+      const razorpayOrder = await razorpay.orders.create(options);
+      
+      if (!razorpayOrder) {
+        throw new Error('Could not create order');
+      }
+
+      // Return required details for the frontend
+      res.status(200).json({
+        success: true,
+        order: razorpayOrder // The frontend expects this format
+      });
+    } catch (razorpayError) {
+      console.error("Razorpay API Error:", razorpayError);
+      throw new Error('Failed to create Razorpay order: ' + razorpayError.message);
+    }
+  } catch (error) {
+    console.error("Server Error:", error);
+    res.status(500).json({ 
+      success: false,
+      msg: "Failed to create payment order",
+      error: error.message || 'Internal server error'
+    });
+  }
+});
+
+// Payment verification route
+router.post('/verify-payment', async (req, res) => {
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature, phone, amount } = req.body;
+
+  try {
+    // Verify the payment signature
+    const sign = razorpay_order_id + "|" + razorpay_payment_id;
+    const expectedSignature = crypto
+      .createHmac("sha256", razorpay.key_secret)
+      .update(sign)
+      .digest("hex");
+
+    if (expectedSignature !== razorpay_signature) {
+      return res.status(400).json({ msg: "Invalid payment signature" });
+    }
+
+    // Verify user and recharge wallet
+    const user = await User.findOne({ phone });
+    if (!user) {
+      return res.status(404).json({ msg: "User not found" });
+    }
+
+    user.wallet += parseFloat(amount);
+    await user.save();
+
+    // Create transaction record
+    const transaction = new Transaction({
+      phone,
+      type: 'Recharge',
+      amount: parseFloat(amount),
+      status: 'Success',
+      description: `Wallet recharged with ₹${amount} via Razorpay.`,
+    });
+
+    await transaction.save();
+
+    res.status(200).json({ msg: "Recharge successful", wallet: user.wallet });
+
+  } catch (err) {
+    console.error('Error in payment verification:', err.message);
+    res.status(500).json({ msg: 'Server error', error: err.message });
+  }
+});
+
+// ... Rest of the routes remain unchanged ...
+
+module.exports = router;
