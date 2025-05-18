@@ -351,10 +351,15 @@ router.post('/login', async (req, res) => {
         phone: user.phone,
         wallet: user.wallet,
         inviteCode: user.inviteCode,
-      },
+        bankInfo: user.bankInfo ? {
+          accountNumber: user.bankInfo.accountNumber || '',
+          ifscCode: user.bankInfo.ifscCode || '',
+          realName: user.bankInfo.realName || ''
+        } : null
+      }
     });
   } catch (err) {
-    console.error(err);
+    console.error('Login error:', err.message);
     res.status(500).json({ msg: 'Server error' });
   }
 });
