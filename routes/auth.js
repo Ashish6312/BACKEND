@@ -10,7 +10,7 @@ const lgPayService = require('../services/lgPayService');
 dotenv.config();
 const crypto = require('crypto');
 
-// Get io instance from app
+// Get the Socket.IO instance from the Express app
 const getIO = (req) => req.app.get('io');
 
 // Registration route
@@ -27,6 +27,8 @@ router.post('/register', async (req, res) => {
   const { username, phone, password, withdrawPassword, referredBy } = req.body;
 
   try {
+    console.log(`Registration attempt: ${username}, ${phone}, referredBy: ${referredBy}`);
+    
     // Check if the phone number is already registered
     const existingPhone = await User.findOne({ phone });
     if (existingPhone) {
@@ -62,120 +64,185 @@ router.post('/register', async (req, res) => {
       password: hashedPassword,
       withdrawPassword: hashedWithdrawPassword,
       inviteCode,
-      referredBy: referredBy || null, // Optional invite code
-    });    // If an invite code is provided, handle multi-level referrals
+      referredBy: referredBy || null,
+      referralChain: {
+        level1: null,
+        level2: null,
+        level3: null
+      },
+      referralEarnings: {
+        level1: 0,
+        level2: 0,
+        level3: 0
+      },
+      referralCounts: {
+        level1: 0,
+        level2: 0,
+        level3: 0
+      },
+      team: []
+    });
+
+    // If an invite code is provided, handle multi-level referrals
     if (referredBy) {
+      console.log(`Processing referral: ${referredBy}`);
+      
       // Level 1 (Direct Referrer)
       const level1Referrer = await User.findOne({ inviteCode: referredBy });
       if (!level1Referrer) {
+        console.log('Invalid invite code');
         return res.status(400).json({ msg: 'Invalid invite code' });
       }
+      
+      console.log(`Found level1 referrer: ${level1Referrer.username}`);
 
       // Set referral chain for new user
       newUser.referralChain.level1 = level1Referrer.inviteCode;
-      newUser.referralChain.level2 = level1Referrer.referralChain.level1;
-      newUser.referralChain.level3 = level1Referrer.referralChain.level2;
+      
+      if (level1Referrer.referralChain && level1Referrer.referralChain.level1) {
+        newUser.referralChain.level2 = level1Referrer.referralChain.level1;
+      }
+      
+      if (level1Referrer.referralChain && level1Referrer.referralChain.level2) {
+        newUser.referralChain.level3 = level1Referrer.referralChain.level2;
+      }
 
-    // Process Level 1 Referral (₹50)
-    level1Referrer.wallet += 50;
-    level1Referrer.referralEarnings.level1 += 50;
-    level1Referrer.referralCounts.level1 += 1;
-    level1Referrer.team.push({
-      _id: newUser._id,
-      phone: newUser.phone,
-      level: 1,
-      joinedAt: new Date()
-    });
+      // Save the new user first to get its _id
+      await newUser.save();
+      console.log(`New user saved with ID: ${newUser._id}`);
 
-    // Create transaction for Level 1
-    const level1Transaction = new Transaction({
-      phone: level1Referrer.phone,
-      type: 'Referral Bonus',
-      amount: 50,
-      status: 'Success',
-      description: `Level 1 referral bonus for inviting user ${newUser.username}`,
-    });
+      // Add the new user to level1Referrer's team
+      if (!level1Referrer.team) {
+        level1Referrer.team = [];
+      }
+      
+      level1Referrer.team.push({
+        _id: newUser._id,
+        phone: newUser.phone,
+        username: newUser.username,
+        level: 1,
+        joinedAt: new Date()
+      });
+      
+      console.log(`Added user to level1 referrer's team. Team size now: ${level1Referrer.team.length}`);
+      await level1Referrer.save();
 
-    await level1Transaction.save();
-    await level1Referrer.save();
-
-    // Level 2 Referral (₹30)
-    if (level1Referrer.referralChain.level1) {
-      const level2Referrer = await User.findOne({ inviteCode: level1Referrer.referralChain.level1 });
-      if (level2Referrer) {
-        level2Referrer.wallet += 30;
-        level2Referrer.referralEarnings.level2 += 30;
-        level2Referrer.referralCounts.level2 += 1;
-        level2Referrer.team.push({
-          _id: newUser._id,
-          phone: newUser.phone,
-          level: 2,
-          joinedAt: new Date()
-        });
-
-        // Create transaction for Level 2
-        const level2Transaction = new Transaction({
-          phone: level2Referrer.phone,
-          type: 'Referral Bonus',
-          amount: 30,
-          status: 'Success',
-          description: `Level 2 referral bonus from ${newUser.username}`,
-        });
-
-        await level2Transaction.save();
-        await level2Referrer.save();
-
-        // Level 3 Referral (₹20)
-        if (level2Referrer.referralChain.level1) {
-          const level3Referrer = await User.findOne({ inviteCode: level2Referrer.referralChain.level1 });
-          if (level3Referrer) {
-            level3Referrer.wallet += 20;
-            level3Referrer.referralEarnings.level3 += 20;
-            level3Referrer.referralCounts.level3 += 1;
-            level3Referrer.team.push({
-              _id: newUser._id,
-              phone: newUser.phone,
-              level: 3,
-              joinedAt: new Date()
-            });
-
-            // Create transaction for Level 3
-            const level3Transaction = new Transaction({
-              phone: level3Referrer.phone,
-              type: 'Referral Bonus',
-              amount: 20,
-              status: 'Success',
-              description: `Level 3 referral bonus from ${newUser.username}`,
-            });
-
-            await level3Transaction.save();
-            await level3Referrer.save();
+      // Add the new user to level2Referrer's team if exists
+      if (newUser.referralChain.level2) {
+        const level2Referrer = await User.findOne({ inviteCode: newUser.referralChain.level2 });
+        if (level2Referrer) {
+          console.log(`Found level2 referrer: ${level2Referrer.username}`);
+          
+          if (!level2Referrer.team) {
+            level2Referrer.team = [];
           }
+          
+          level2Referrer.team.push({
+            _id: newUser._id,
+            phone: newUser.phone,
+            username: newUser.username,
+            level: 2,
+            joinedAt: new Date()
+          });
+          
+          console.log(`Added user to level2 referrer's team. Team size now: ${level2Referrer.team.length}`);
+          await level2Referrer.save();
         }
       }
-    }
-    
-    // Notify the user about the successful referral if you're using Socket.IO
-    const io = getIO(req);
-    if (io) {
-      io.emit(`user:${inviter._id}:notification`, {
-        type: 'referral',
-        message: `You earned ₹${referralBonus} for referring ${newUser.username}!`,
-      });
-    }
-    }
 
-    // Save the new user
-    await newUser.save();
+      // Add the new user to level3Referrer's team if exists
+      if (newUser.referralChain.level3) {
+        const level3Referrer = await User.findOne({ inviteCode: newUser.referralChain.level3 });
+        if (level3Referrer) {
+          console.log(`Found level3 referrer: ${level3Referrer.username}`);
+          
+          if (!level3Referrer.team) {
+            level3Referrer.team = [];
+          }
+          
+          level3Referrer.team.push({
+            _id: newUser._id,
+            phone: newUser.phone,
+            username: newUser.username,
+            level: 3,
+            joinedAt: new Date()
+          });
+          
+          console.log(`Added user to level3 referrer's team. Team size now: ${level3Referrer.team.length}`);
+          await level3Referrer.save();
+        }
+      }
+    } else {
+      // If no referral, just save the new user
+      await newUser.save();
+      console.log(`New user saved with ID: ${newUser._id} (no referral)`);
+    }
 
     res.status(201).json({ msg: 'Registration successful', inviteCode });
   } catch (err) {
-    console.error(err);
+    console.error('Registration error:', err);
     res.status(500).json({ msg: 'Server error' });
   }
 });
 
-// Updated wallet recharge callback route to include invite rewards
+// --- Referral reward helper ---
+async function distributeReferralRewards({ user, amount, req }) {
+  const referralChain = user.referralChain || {};
+  const level1InviteCode = referralChain.level1;
+  const level2InviteCode = referralChain.level2;
+  const level3InviteCode = referralChain.level3;
+
+  // Referral reward percentages
+  const REFERRAL_REWARD_PERCENT = {
+    level1: 0.25, // 25%
+    level2: 0.03, // 3%
+    level3: 0.02  // 2%
+  };
+
+  // Helper function to process reward for a level
+  async function processReward(level, inviteCode, percent) {
+    if (!inviteCode) return;
+    const referrer = await User.findOne({ inviteCode });
+    if (!referrer) return;
+
+    // Calculate reward based on recharge amount
+    const rewardAmount = amount * percent;
+    referrer.wallet += rewardAmount;
+    if (!referrer.referralEarnings) {
+      referrer.referralEarnings = { level1: 0, level2: 0, level3: 0 };
+    }
+    if (!referrer.referralEarnings[`level${level}`]) {
+      referrer.referralEarnings[`level${level}`] = 0;
+    }
+    referrer.referralEarnings[`level${level}`] += rewardAmount;
+
+    // Create transaction record for the referral bonus
+    const transaction = new Transaction({
+      phone: referrer.phone,
+      type: 'Referral Bonus',
+      amount: rewardAmount,
+      status: 'Success',
+      description: `Level ${level} referral bonus (${percent*100}%) from wallet recharge of ₹${amount} by user ${user.username}`,
+    });
+    await transaction.save();
+    await referrer.save();
+
+    // Notify the referrer about the bonus if using Socket.IO
+    const io = getIO(req);
+    if (io) {
+      io.emit(`user:${referrer._id}:notification`, {
+        type: 'referralBonus',
+        message: `You earned ₹${rewardAmount.toFixed(2)} (${percent*100}%) from ${user.username}'s wallet recharge of ₹${amount}!`,
+      });
+    }
+  }
+
+  await processReward(1, level1InviteCode, REFERRAL_REWARD_PERCENT.level1);
+  await processReward(2, level2InviteCode, REFERRAL_REWARD_PERCENT.level2);
+  await processReward(3, level3InviteCode, REFERRAL_REWARD_PERCENT.level3);
+}
+
+// --- Wallet recharge callback route (with referral rewards) ---
 router.post('/transaction/recharge/callback', async (req, res) => {
   const { order_sn, status, money, remark: phone } = req.body;
   // Verify signature
@@ -196,56 +263,9 @@ router.post('/transaction/recharge/callback', async (req, res) => {
     await user.save();
 
     // Distribute invite rewards based on recharge amount
-    const referralChain = user.referralChain || {};
-    const level1InviteCode = referralChain.level1;
-    const level2InviteCode = referralChain.level2;
-    const level3InviteCode = referralChain.level3;
+    await distributeReferralRewards({ user, amount, req });
 
-    // Referral reward percentages for new logic
-    const REFERRAL_REWARD_PERCENT = {
-      level1: 0.25, // 25%
-      level2: 0.03, // 3%
-      level3: 0.02  // 2%
-    };
-
-    // Helper function to process reward for a level
-    async function processReward(level, inviteCode, percent) {
-      if (!inviteCode) return;
-      const referrer = await User.findOne({ inviteCode });
-      if (!referrer) return;
-
-      // Only reward if user has recharged after account creation
-      if (parseFloat(amount) > 0) {
-        const rewardAmount = parseFloat(amount) * percent;
-        referrer.wallet += rewardAmount;
-        if (!referrer.referralEarnings) referrer.referralEarnings = {};
-        if (!referrer.referralEarnings[`level${level}`]) referrer.referralEarnings[`level${level}`] = 0;
-        referrer.referralEarnings[`level${level}`] += rewardAmount;
-        if (!referrer.referralCounts) referrer.referralCounts = {};
-        if (!referrer.referralCounts[`level${level}`]) referrer.referralCounts[`level${level}`] = 0;
-        referrer.referralCounts[`level${level}`] += 1;
-        referrer.team.push({
-          _id: user._id,
-          phone: user.phone,
-          level: level,
-          joinedAt: new Date()
-        });
-        const transaction = new Transaction({
-          phone: referrer.phone,
-          type: 'Referral Bonus',
-          amount: rewardAmount,
-          status: 'Success',
-          description: `Level ${level} referral bonus from wallet recharge of user ${user.username}`,
-        });
-        await transaction.save();
-        await referrer.save();
-      }
-    }
-
-    await processReward(1, level1InviteCode, level1Percent);
-    await processReward(2, level2InviteCode, level2Percent);
-    await processReward(3, level3InviteCode, level3Percent);
-
+    // Create transaction record for the recharge
     const transaction = new Transaction({
       phone,
       type: 'Recharge',
@@ -257,11 +277,13 @@ router.post('/transaction/recharge/callback', async (req, res) => {
 
     // Emit socket event for real-time wallet update
     const io = getIO(req);
-    io.emit('paymentComplete', {
-      phone: user.phone,
-      wallet: user.wallet,
-      amount: amount
-    });
+    if (io) {
+      io.emit('paymentComplete', {
+        phone: user.phone,
+        wallet: user.wallet,
+        amount: amount
+      });
+    }
 
     res.status(200).json({ msg: "Recharge successful", wallet: user.wallet });
   } catch (err) {
@@ -270,7 +292,7 @@ router.post('/transaction/recharge/callback', async (req, res) => {
   }
 });
 
-// Updated wallet recharge route to include invite rewards
+// --- Manual wallet recharge route (with referral rewards) ---
 router.post('/transaction/recharge', async (req, res) => {
   const { phone, amount, transactionPassword } = req.body;
 
@@ -281,67 +303,21 @@ router.post('/transaction/recharge', async (req, res) => {
     const isMatch = await bcrypt.compare(transactionPassword, user.withdrawPassword);
     if (!isMatch) return res.status(400).json({ msg: 'Invalid transaction password' });
 
-    user.wallet += parseFloat(amount);
+    const rechargeAmount = parseFloat(amount);
+    user.wallet += rechargeAmount;
     await user.save();
 
     // Distribute invite rewards based on recharge amount
-    const referralChain = user.referralChain || {};
-    const level1InviteCode = referralChain.level1;
-    const level2InviteCode = referralChain.level2;
-    const level3InviteCode = referralChain.level3;
+    await distributeReferralRewards({ user, amount: rechargeAmount, req });
 
-    // Referral reward percentages for new logic
-    const REFERRAL_REWARD_PERCENT = {
-      level1: 0.25, // 25%
-      level2: 0.03, // 3%
-      level3: 0.02  // 2%
-    };
-
-    async function processReward(level, inviteCode, percent) {
-      if (!inviteCode) return;
-      const referrer = await User.findOne({ inviteCode });
-      if (!referrer) return;
-
-      // Only reward if user has recharged after account creation
-      if (parseFloat(amount) > 0) {
-        const rewardAmount = parseFloat(amount) * percent;
-        referrer.wallet += rewardAmount;
-        if (!referrer.referralEarnings) referrer.referralEarnings = {};
-        if (!referrer.referralEarnings[`level${level}`]) referrer.referralEarnings[`level${level}`] = 0;
-        referrer.referralEarnings[`level${level}`] += rewardAmount;
-        if (!referrer.referralCounts) referrer.referralCounts = {};
-        if (!referrer.referralCounts[`level${level}`]) referrer.referralCounts[`level${level}`] = 0;
-        referrer.referralCounts[`level${level}`] += 1;
-        referrer.team.push({
-          _id: user._id,
-          phone: user.phone,
-          level: level,
-          joinedAt: new Date()
-        });
-        const transaction = new Transaction({
-          phone: referrer.phone,
-          type: 'Referral Bonus',
-          amount: rewardAmount,
-          status: 'Success',
-          description: `Level ${level} referral bonus from wallet recharge of user ${user.username}`,
-        });
-        await transaction.save();
-        await referrer.save();
-      }
-    }
-
-    await processReward(1, level1InviteCode, level1Percent);
-    await processReward(2, level2InviteCode, level2Percent);
-    await processReward(3, level3InviteCode, level3Percent);
-
+    // Create transaction record for the recharge
     const transaction = new Transaction({
       phone,
       type: 'Recharge',
-      amount: parseFloat(amount),
+      amount: rechargeAmount,
       status: 'Success',
-      description: `Wallet recharged with ₹${amount}. Thank you for using our service!`,
+      description: `Wallet recharged with ₹${rechargeAmount}. Thank you for using our service!`,
     });
-
     await transaction.save();
 
     res.status(200).json({ msg: 'Recharge successful', wallet: user.wallet });
@@ -631,6 +607,84 @@ router.post('/profile/change-withdraw-password', async (req, res) => {
   }
 });
 
+// Update the route to get referrals by user ID instead of invite code
+router.get('/profile/team/:userId', async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    // Find the user by ID
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ msg: 'User not found' });
+
+    // Check if the user has a team
+    if (!user.team || user.team.length === 0) {
+      return res.json({ 
+        team: [],
+        stats: {
+          totalTeamMembers: 0,
+          level1Count: 0,
+          level2Count: 0,
+          level3Count: 0
+        }
+      });
+    }
+
+    // Get detailed information about each team member
+    const teamWithDetails = await Promise.all(
+      user.team.map(async (member) => {
+        try {
+          const memberDetails = await User.findById(member._id);
+          if (!memberDetails) {
+            return {
+              _id: member._id,
+              phone: member.phone,
+              username: member.username || 'Unknown',
+              level: member.level,
+              joinedAt: member.joinedAt
+            };
+          }
+          
+          return {
+            _id: memberDetails._id,
+            phone: memberDetails.phone,
+            username: memberDetails.username,
+            level: member.level,
+            joinedAt: member.joinedAt || memberDetails.createdAt
+          };
+        } catch (err) {
+          console.error(`Error fetching team member details: ${err.message}`);
+          return {
+            _id: member._id,
+            phone: member.phone,
+            username: member.username || 'Unknown',
+            level: member.level,
+            joinedAt: member.joinedAt
+          };
+        }
+      })
+    );
+
+    // Calculate team statistics
+    const level1Members = teamWithDetails.filter(m => m.level === 1);
+    const level2Members = teamWithDetails.filter(m => m.level === 2);
+    const level3Members = teamWithDetails.filter(m => m.level === 3);
+
+    res.json({
+      team: teamWithDetails,
+      stats: {
+        totalTeamMembers: teamWithDetails.length,
+        level1Count: level1Members.length,
+        level2Count: level2Members.length,
+        level3Count: level3Members.length
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching team data:', err.message);
+    res.status(500).json({ msg: 'Server error', error: err.message });
+  }
+});
+
+// Keep the existing route for backward compatibility
 router.get('/profile/referrals/:inviteCode', async (req, res) => {
   const { inviteCode } = req.params;
 
@@ -639,32 +693,69 @@ router.get('/profile/referrals/:inviteCode', async (req, res) => {
     const referrer = await User.findOne({ inviteCode });
     if (!referrer) return res.status(404).json({ msg: 'Referrer not found' });
 
+    // Check if the user has a team
+    if (!referrer.team || referrer.team.length === 0) {
+      return res.json({ 
+        referrals: [],
+        stats: {
+          totalReferrals: 0,
+          referralEarnings: referrer.referralEarnings || 0
+        }
+      });
+    }
+
     // Manually populate team members with more details
     const populatedTeam = await Promise.all(
       referrer.team.map(async (member) => {
-        const userDetails = await User.findById(member._id);
-        return {
-          _id: userDetails._id,
-          phone: userDetails.phone,
-          username: userDetails.username,
-          joinedAt: userDetails.createdAt,
-        };
+        try {
+          const userDetails = await User.findById(member._id);
+          if (!userDetails) {
+            return {
+              _id: member._id,
+              phone: member.phone,
+              username: member.username || 'Unknown',
+              level: member.level,
+              joinedAt: member.joinedAt
+            };
+          }
+          
+          return {
+            _id: userDetails._id,
+            phone: userDetails.phone,
+            username: userDetails.username,
+            level: member.level,
+            joinedAt: member.joinedAt || userDetails.createdAt
+          };
+        } catch (err) {
+          console.error(`Error fetching team member details: ${err.message}`);
+          return {
+            _id: member._id,
+            phone: member.phone,
+            username: member.username || 'Unknown',
+            level: member.level,
+            joinedAt: member.joinedAt
+          };
+        }
       })
     );
 
     // Calculate referral statistics
     const totalReferrals = populatedTeam.length;
-    const referralEarnings = referrer.referralEarnings || 0;
+    const totalEarnings = 
+      (referrer.referralEarnings?.level1 || 0) + 
+      (referrer.referralEarnings?.level2 || 0) + 
+      (referrer.referralEarnings?.level3 || 0);
 
     // Return populated team with stats
     res.status(200).json({ 
       referrals: populatedTeam,
       stats: {
         totalReferrals,
-        referralEarnings
+        referralEarnings: totalEarnings
       }
     });
   } catch (err) {
+    console.error('Error fetching referrals:', err.message);
     res.status(500).json({ msg: 'Server error', error: err.message });
   }
 });
@@ -689,6 +780,64 @@ router.get('/profile/referral-earnings/:userId', async (req, res) => {
     });
   } catch (err) {
     console.error('Error fetching referral earnings:', err.message);
+    res.status(500).json({ msg: 'Server error', error: err.message });
+  }
+});
+
+// Get total referral earnings for a user
+router.get('/referral-earnings/:phone', async (req, res) => {
+  const { phone } = req.params;
+  try {
+    const user = await User.findOne({ phone });
+    if (!user) {
+      return res.status(404).json({ msg: 'User not found' });
+    }
+    
+    // Get total earnings from referral transactions
+    const totalEarnings = await Transaction.aggregate([
+      {
+        $match: {
+          phone: user.phone,
+          type: 'Referral Bonus',
+          status: 'Success'
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          total: { $sum: '$amount' }
+        }
+      }
+    ]);
+
+    res.status(200).json({
+      totalEarnings: totalEarnings[0]?.total || 0
+    });
+  } catch (err) {
+    console.error('Error fetching referral earnings:', err.message);
+    res.status(500).json({ msg: 'Server error', error: err.message });
+  }
+});
+
+// Get referral transactions between referrer and referred user
+router.get('/referral-transactions/:referrerPhone/:referredPhone', async (req, res) => {
+  const { referrerPhone, referredPhone } = req.params;
+  try {
+    const transactions = await Transaction.find({
+      phone: referrerPhone,
+      type: 'Referral Bonus',
+      status: 'Success',
+      description: { $regex: new RegExp(referredPhone, 'i') }
+    });
+
+    const totalEarnings = transactions.reduce((sum, tx) => sum + tx.amount, 0);
+
+    res.status(200).json({
+      transactions,
+      totalEarnings
+    });
+  } catch (err) {
+    console.error('Error fetching referral transactions:', err.message);
     res.status(500).json({ msg: 'Server error', error: err.message });
   }
 });
@@ -899,6 +1048,96 @@ router.get('/all-users', async (req, res) => {
     const users = await User.find({}, { phone: 1, createdAt: 1, _id: 1 });
     res.status(200).json({ users });
   } catch (err) {
+    res.status(500).json({ msg: 'Server error', error: err.message });
+  }
+});
+
+// GET /api/auth/team-members/:userId
+router.get('/team-members/:userId', async (req, res) => {
+  const { userId } = req.params;
+  
+  try {
+    console.log(`Fetching team members for user ID: ${userId}`);
+    
+    const user = await User.findById(userId);
+    if (!user) {
+      console.log('User not found');
+      return res.status(404).json({ msg: 'User not found' });
+    }
+    
+    console.log(`User found: ${user.username}, Team size: ${user.team ? user.team.length : 0}`);
+    
+    // If user has no team or empty team array
+    if (!user.team || user.team.length === 0) {
+      console.log('User has no team members');
+      return res.json({ 
+        teamMembers: [],
+        stats: {
+          totalMembers: 0,
+          level1: 0,
+          level2: 0,
+          level3: 0
+        }
+      });
+    }
+    
+    // Log team data for debugging
+    console.log('Raw team data:', JSON.stringify(user.team));
+    
+    // Get detailed information for each team member
+    const teamMembers = await Promise.all(
+      user.team.map(async (member) => {
+        try {
+          const memberDetails = await User.findById(member._id);
+          if (!memberDetails) {
+            console.log(`Team member not found: ${member._id}`);
+            return {
+              _id: member._id,
+              phone: member.phone,
+              username: member.username || 'Unknown',
+              level: member.level,
+              joinedAt: member.joinedAt
+            };
+          }
+          
+          return {
+            _id: memberDetails._id,
+            phone: memberDetails.phone,
+            username: memberDetails.username,
+            level: member.level,
+            joinedAt: member.joinedAt || memberDetails.createdAt
+          };
+        } catch (err) {
+          console.error(`Error fetching team member details: ${err.message}`);
+          return {
+            _id: member._id,
+            phone: member.phone,
+            username: member.username || 'Unknown',
+            level: member.level,
+            joinedAt: member.joinedAt
+          };
+        }
+      })
+    );
+    
+    // Calculate statistics
+    const level1 = teamMembers.filter(m => m.level === 1).length;
+    const level2 = teamMembers.filter(m => m.level === 2).length;
+    const level3 = teamMembers.filter(m => m.level === 3).length;
+    
+    console.log(`Returning ${teamMembers.length} team members`);
+    
+    res.json({
+      teamMembers,
+      stats: {
+        totalMembers: teamMembers.length,
+        level1,
+        level2,
+        level3
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching team members:', err.message);
     res.status(500).json({ msg: 'Server error', error: err.message });
   }
 });

@@ -39,21 +39,23 @@ router.get('/', async (req, res) => {
 // POST new plan (Admin only)
 router.post('/', verifyAdmin, upload.single('image'), async (req, res) => {
   try {
-    const { name, price, dailyIncome, planType } = req.body;
+    const { name, price, dailyIncome, planType, duration } = req.body;
     const image = req.file ? `/uploads/plans/${req.file.filename}` : null;
 
     if (!name || !price || !dailyIncome || !planType) {
       return res.status(400).json({ msg: 'All fields are required' });
     }
+
     const newPlan = new Plan({ 
       name, 
       price: parseFloat(price), 
       dailyIncome: parseFloat(dailyIncome), 
       planType, 
-      image 
+      image,
+      duration: duration ? parseInt(duration) : 365 // Parse duration from request
     });
+
     await newPlan.save();
-    
     console.log('Plan created successfully:', newPlan);
     res.status(201).json(newPlan);
   } catch (err) {
@@ -64,8 +66,14 @@ router.post('/', verifyAdmin, upload.single('image'), async (req, res) => {
 
 // PUT update plan (Admin only)
 router.put('/:id', verifyAdmin, upload.single('image'), async (req, res) => {
-  const { name, price, dailyIncome, planType } = req.body;
-  const updateFields = { name, price, dailyIncome, planType };
+  const { name, price, dailyIncome, planType, duration } = req.body;
+  const updateFields = { 
+    name, 
+    price: parseFloat(price), 
+    dailyIncome: parseFloat(dailyIncome), 
+    planType,
+    duration: duration ? parseInt(duration) : 365 // Parse duration from request
+  };
 
   if (req.file) {
     updateFields.image = `/uploads/plans/${req.file.filename}`;
